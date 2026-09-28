@@ -1,0 +1,705 @@
+// Workspace OS — Prisma schema
+// Normalized relational model. No entity stores whole-app-state JSON blobs;
+// JSON columns are used only for genuinely free-form leaf data (block content,
+// version snapshots, notification payloads), never as the source of truth for
+// relationships between entities.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
+
+model User {
+  id            String   @id @default(uuid())
+  email         String   @unique
+  passwordHash  String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  profile              Profile?
+  refreshTokens        RefreshToken[]
+  worldMemberships     WorldMember[]
+  ownedWorlds          World[]              @relation("WorldOwner")
+  pagesUpdated         Page[]               @relation("PageUpdatedBy")
+  tasksAssigned        Task[]               @relation("TaskAssignee")
+  transactionsPaid     Transaction[]        @relation("TransactionPayer")
+  filesUploaded        File[]               @relation("FileUploader")
+  ideasCreated         Idea[]               @relation("IdeaCreator")
+  activityLogs         ActivityLog[]
+  comments             Comment[]
+  notifications        Notification[]
+  versionsAuthored     Version[]
+  invitesSent          WorldInvite[]        @relation("InviteSender")
+  calendarEventsOwned  CalendarEvent[]      @relation("EventOwner")
+}
+
+model Profile {
+  id        String  @id @default(uuid())
+  userId    String  @unique
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  initials  String
+  color     String  @default("#4b5bff")
+  avatarUrl String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model PasswordResetToken {
+  id        String   @id @default(uuid())
+  userId    String
+  tokenHash String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Worlds & membership
+// ---------------------------------------------------------------------------
+
+enum WorldAccess {
+  private
+  shared
+}
+
+enum WorldRole {
+  owner
+  editor
+  commenter
+  viewer
+}
+
+model World {
+  id          String      @id @default(uuid())
+  name        String
+  icon        String      @default("🗂️")
+  accent      String      @default("#4b5bff")
+  description String      @default("")
+  access      WorldAccess @default(private)
+  sandbox     Boolean     @default(false)
+  archived    Boolean     @default(false)
+  deletedAt   DateTime?
+  ownerId     String
+  owner       User        @relation("WorldOwner", fields: [ownerId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members       WorldMember[]
+  invites       WorldInvite[]
+  pages         Page[]
+  projects      Project[]
+  tasks         Task[]
+  transactions  Transaction[]
+  people        Person[]
+  companies     Company[]
+  files         File[]
+  folders       Folder[]
+  ideas         Idea[]
+  activityLogs  ActivityLog[]
+  notifications Notification[]
+  templates     Template[]
+  versions      Version[]
+  tags          Tag[]
+  calendarEvents CalendarEvent[]
+
+  @@index([ownerId])
+}
+
+model WorldMember {
+  id       String    @id @default(uuid())
+  worldId  String
+  world    World     @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  userId   String
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role     WorldRole @default(viewer)
+  joinedAt DateTime  @default(now())
+
+  @@unique([worldId, userId])
+  @@index([userId])
+}
+
+model WorldInvite {
+  id          String    @id @default(uuid())
+  worldId     String
+  world       World     @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  email       String
+  role        WorldRole @default(viewer)
+  tokenHash   String    @unique
+  invitedById String
+  invitedBy   User      @relation("InviteSender", fields: [invitedById], references: [id])
+  acceptedAt  DateTime?
+  expiresAt   DateTime
+  createdAt   DateTime  @default(now())
+
+  @@index([worldId])
+}
+
+// ---------------------------------------------------------------------------
+// Pages & blocks (+ version history)
+// ---------------------------------------------------------------------------
+
+model Page {
+  id          String   @id @default(uuid())
+  worldId     String
+  world       World    @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  title       String
+  icon        String   @default("📄")
+  pinned      Boolean  @default(false)
+  archived    Boolean  @default(false)
+  isTemplate  Boolean  @default(false)
+  deletedAt   DateTime?
+  updatedById String
+  updatedBy   User     @relation("PageUpdatedBy", fields: [updatedById], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  blocks   Block[]
+  tags     TaggedItem[]
+  comments Comment[]
+  versions Version[]
+
+  @@index([worldId])
+}
+
+enum BlockType {
+  heading
+  text
+  checklist
+  callout
+  divider
+  quote
+  table
+  calculator
+  kanban
+}
+
+model Block {
+  id       String    @id @default(uuid())
+  pageId   String
+  page     Page      @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  type     BlockType
+  position Int       @default(0)
+  // Free-form leaf content. Structure depends on `type` and mirrors the
+  // existing frontend Block shape (text / items / rows / calc / meta).
+  content  Json      @default("{}")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([pageId, position])
+}
+
+// ---------------------------------------------------------------------------
+// Projects, Tasks, Subtasks
+// ---------------------------------------------------------------------------
+
+enum ProjectStatus {
+  idea
+  planning
+  active
+  blocked
+  completed
+  archived
+}
+
+model Project {
+  id          String        @id @default(uuid())
+  worldId     String
+  world       World         @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  name        String
+  status      ProjectStatus @default(idea)
+  description String        @default("")
+  investment  Float         @default(0)
+  goal        String        @default("")
+  deletedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tasks         Task[]
+  transactions  Transaction[]
+  people        Person[]
+  files         File[]
+  calendarEvents CalendarEvent[]
+  tags          TaggedItem[]
+
+  @@index([worldId])
+}
+
+enum TaskStatus {
+  todo
+  doing
+  waiting
+  done
+}
+
+enum Priority {
+  low
+  medium
+  high
+  urgent
+}
+
+model Task {
+  id         String     @id @default(uuid())
+  worldId    String
+  world      World      @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  projectId  String?
+  project    Project?   @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  title       String
+  description String     @default("")
+  status      TaskStatus @default(todo)
+  priority    Priority   @default(medium)
+  assigneeId  String?
+  assignee    User?      @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  due         DateTime?
+  deletedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  subtasks Subtask[]
+  tags     TaggedItem[]
+
+  @@index([worldId])
+  @@index([projectId])
+}
+
+model Subtask {
+  id        String   @id @default(uuid())
+  taskId    String
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  title     String
+  done      Boolean  @default(false)
+  position  Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([taskId])
+}
+
+// ---------------------------------------------------------------------------
+// Finance: Transactions with real, computed expense-splitting
+// ---------------------------------------------------------------------------
+
+enum TxType {
+  income
+  expense
+  investment
+  reimbursement
+  settlement
+}
+
+model Transaction {
+  id          String   @id @default(uuid())
+  worldId     String
+  world       World    @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  projectId   String?
+  project     Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  type        TxType
+  amount      Float
+  date        DateTime
+  category    String   @default("General")
+  description String   @default("")
+  method      String   @default("Other")
+  payerId     String
+  payer       User     @relation("TransactionPayer", fields: [payerId], references: [id])
+  isSplit     Boolean  @default(false)
+  settledAt   DateTime?
+  deletedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  splitParticipants SplitParticipant[]
+
+  @@index([worldId])
+  @@index([projectId])
+}
+
+// Who owes what for a split transaction. Amounts are always DERIVED
+// (computed by the split service from `amount` and each participant's
+// `sharePercent` / `shareAmount`), never entered directly by the client.
+model SplitParticipant {
+  id            String      @id @default(uuid())
+  transactionId String
+  transaction   Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  userId        String
+  sharePercent  Float       // e.g. 50 for a 50/50 split
+  owedAmount    Float       // computed: amount * sharePercent / 100
+  isPayer       Boolean     @default(false)
+
+  @@unique([transactionId, userId])
+}
+
+// ---------------------------------------------------------------------------
+// People / Companies (CRM)
+// ---------------------------------------------------------------------------
+
+enum PersonStage {
+  new
+  contacted
+  meeting
+  proposal
+  won
+  lost
+}
+
+model Company {
+  id        String   @id @default(uuid())
+  worldId   String
+  world     World    @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  name      String
+  website   String?
+  notes     String   @default("")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  people Person[]
+
+  @@unique([worldId, name])
+  @@index([worldId])
+}
+
+model Person {
+  id        String      @id @default(uuid())
+  worldId   String
+  world     World       @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  projectId String?
+  project   Project?    @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  companyId String?
+  company   Company?    @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  name      String
+  role      String   @default("")
+  email     String   @default("")
+  phone     String   @default("")
+  stage     PersonStage @default(new)
+  notes     String   @default("")
+  deletedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tags TaggedItem[]
+
+  @@index([worldId])
+}
+
+// ---------------------------------------------------------------------------
+// Files & Folders (metadata; bytes live in object storage)
+// ---------------------------------------------------------------------------
+
+model Folder {
+  id        String   @id @default(uuid())
+  worldId   String
+  world     World    @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  name      String
+  parentId  String?
+  parent    Folder?  @relation("FolderTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children  Folder[] @relation("FolderTree")
+  createdAt DateTime @default(now())
+
+  files File[]
+
+  @@index([worldId])
+}
+
+model File {
+  id          String   @id @default(uuid())
+  worldId     String
+  world       World    @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  folderId    String?
+  folder      Folder?  @relation(fields: [folderId], references: [id], onDelete: SetNull)
+  projectId   String?
+  project     Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  name        String
+  kind        String   // pdf | image | file | ...
+  mimeType    String   @default("application/octet-stream")
+  sizeBytes   Int      @default(0)
+  storageKey  String   // key/path in the storage provider
+  archived    Boolean  @default(false)
+  deletedAt   DateTime?
+  uploadedById String
+  uploadedBy  User     @relation("FileUploader", fields: [uploadedById], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([worldId])
+  @@index([folderId])
+}
+
+// ---------------------------------------------------------------------------
+// Ideas
+// ---------------------------------------------------------------------------
+
+enum IdeaStatus {
+  thought
+  exploring
+  researching
+  building
+  live
+  killed
+}
+
+model Idea {
+  id        String     @id @default(uuid())
+  worldId   String
+  world     World      @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  title     String
+  note      String     @default("")
+  status    IdeaStatus @default(thought)
+  createdById String
+  createdBy   User     @relation("IdeaCreator", fields: [createdById], references: [id])
+  deletedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([worldId])
+}
+
+// ---------------------------------------------------------------------------
+// Calendar
+// ---------------------------------------------------------------------------
+
+model CalendarEvent {
+  id        String   @id @default(uuid())
+  worldId   String
+  world     World    @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  projectId String?
+  project   Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  title     String
+  startsAt  DateTime
+  endsAt    DateTime?
+  allDay    Boolean  @default(false)
+  location  String   @default("")
+  ownerId   String
+  owner     User     @relation("EventOwner", fields: [ownerId], references: [id])
+  deletedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([worldId])
+}
+
+// ---------------------------------------------------------------------------
+// Comments (polymorphic: attach to Page, Task, Project, Idea, File)
+// ---------------------------------------------------------------------------
+
+enum CommentEntityType {
+  page
+  task
+  project
+  idea
+  file
+}
+
+model Comment {
+  id         String            @id @default(uuid())
+  entityType CommentEntityType
+  entityId   String
+  worldId    String
+  authorId   String
+  author     User              @relation(fields: [authorId], references: [id])
+  body       String
+  pageId     String?
+  page       Page?             @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  deletedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([entityType, entityId])
+  @@index([worldId])
+}
+
+// ---------------------------------------------------------------------------
+// Notifications
+// ---------------------------------------------------------------------------
+
+enum NotificationType {
+  mention
+  assigned_task
+  invited_to_world
+  comment_reply
+  transaction_split
+  page_updated
+}
+
+model Notification {
+  id        String           @id @default(uuid())
+  userId    String
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  worldId   String?
+  world     World?           @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  type      NotificationType
+  payload   Json             @default("{}")
+  readAt    DateTime?
+  createdAt DateTime         @default(now())
+
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Activity log
+// ---------------------------------------------------------------------------
+
+model ActivityLog {
+  id         String   @id @default(uuid())
+  worldId    String?
+  world      World?   @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  actorId    String
+  actor      User     @relation(fields: [actorId], references: [id])
+  action     String   // e.g. "page.created", "task.completed"
+  entityType String?
+  entityId   String?
+  text       String   // human-readable summary, matches frontend Activity.text
+  createdAt  DateTime @default(now())
+
+  @@index([worldId])
+  @@index([actorId])
+}
+
+// ---------------------------------------------------------------------------
+// Templates
+// ---------------------------------------------------------------------------
+
+model Template {
+  id          String   @id @default(uuid())
+  worldId     String
+  world       World    @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  name        String
+  description String   @default("")
+  // Snapshot of blocks (same shape as Block.content array) used to seed a new Page.
+  blocksSnapshot Json  @default("[]")
+  icon        String   @default("📄")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([worldId])
+}
+
+// ---------------------------------------------------------------------------
+// Version history (generic — Pages today; extensible to other entities)
+// ---------------------------------------------------------------------------
+
+enum VersionEntityType {
+  page
+  project
+}
+
+model Version {
+  id            String            @id @default(uuid())
+  worldId       String
+  world         World             @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  entityType    VersionEntityType
+  entityId      String
+  pageId        String?
+  page          Page?             @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  versionNumber Int
+  snapshot      Json              // full denormalized snapshot at time of save
+  authorId      String
+  author        User              @relation(fields: [authorId], references: [id])
+  createdAt     DateTime          @default(now())
+
+  @@unique([entityType, entityId, versionNumber])
+  @@index([worldId])
+}
+
+// ---------------------------------------------------------------------------
+// Tags (+ polymorphic tagging join) and generic Relationships
+// ---------------------------------------------------------------------------
+
+model Tag {
+  id      String @id @default(uuid())
+  worldId String
+  world   World  @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  name    String
+
+  items TaggedItem[]
+
+  @@unique([worldId, name])
+}
+
+enum TaggableType {
+  page
+  task
+  project
+  person
+  idea
+}
+
+model TaggedItem {
+  id       String       @id @default(uuid())
+  tagId    String
+  tag      Tag          @relation(fields: [tagId], references: [id], onDelete: Cascade)
+  itemType TaggableType
+  itemId   String
+
+  pageId    String?
+  page      Page?    @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  taskId    String?
+  task      Task?    @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  projectId String?
+  project   Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  personId  String?
+  person    Person?  @relation(fields: [personId], references: [id], onDelete: Cascade)
+
+  @@unique([tagId, itemType, itemId])
+  @@index([itemType, itemId])
+}
+
+enum RelatableType {
+  page
+  project
+  task
+  person
+  company
+  file
+  idea
+  transaction
+  calendarEvent
+}
+
+// Generic many-to-many link between any two entities that aren't already
+// directly foreign-keyed (e.g. "this File relates to this Idea").
+model Relationship {
+  id         String        @id @default(uuid())
+  worldId    String
+  fromType   RelatableType
+  fromId     String
+  toType     RelatableType
+  toId       String
+  label      String        @default("related")
+  createdAt  DateTime      @default(now())
+
+  @@unique([fromType, fromId, toType, toId, label])
+  @@index([worldId])
+}
